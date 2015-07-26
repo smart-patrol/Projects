@@ -1,0 +1,300 @@
+---
+title: "Sales Data Explore"
+author: "Charles Frenzel"
+date: "Tuesday, January 26, 2015"
+output:
+  html_document:
+    theme: readable
+---
+
+```{r    echo=FALSE, warning=FALSE, message=FALSE}
+rm(list = ls(all = TRUE))
+
+library(RODBC)
+library(plyr)
+library(dplyr)
+library(ggvis)
+library(ggplot2)
+library(reshape2)
+```
+
+
+```{r, echo=T, message=FALSE, eval=FALSE , warning=FALSE}
+load(mth, file="monthly_sales.RData")
+load(brnd, file="brands.RData")
+```
+
+
+Merge back the data and look at some brief summaries
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+df <- left_join(mth, brnd, by = c("BRNDID"))
+df <- tbl_df(df)
+
+df$BRND_NM <- toupper(df$BRND_NM)
+df$Date <- as.Date(paste(df$Year,df$Month,"1",sep="-"))
+df <- df %>%  arrange(Date)
+names(df) <- tolower(names(df))
+
+
+p_tbl <- df %>% 
+     filter(year == 2014, month != 11) %>%
+     select(amt, cnt, id, month, brnd_nm) %>%
+     mutate(Period =  ifelse(month < 6 , "First_5_Months", "Last_5_Months")) %>%
+    group_by(Period, brnd_nm) %>%
+     summarize(Total_Amounts = round(sum(amt, na.rm=T),0)
+                ,Total_Counts = round(sum(cnt, na.rm=T),0)
+                ,Unique_Custs = n_distinct(id)
+                ,Count_of_Custs = n() ) %>%
+  select(Total_Amounts, Total_Counts, Unique_Custs, Count_of_Custs, Brand_Name = brnd_nm, Period) %>%
+  arrange(desc(Unique_Custs))
+```
+
+
+####Change in Amounts Frist 5 Months vs Last 5 Months
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.width=9}
+amt_tbl = p_tbl  %>%
+        select(Period, Brand_Name, Total_Amounts) %>%
+         dcast(., Brand_Name ~ Period) %>%
+          mutate( Change = paste(round( ((Last_5_Months - First_5_Months) / First_5_Months), 2)*100,"%",sep="")
+                  ,Change_num = round( ((Last_5_Months - First_5_Months) / First_5_Months), 2) ) %>%
+            arrange(desc(Change_num))
+
+ggplot(data=amt_tbl, aes(x=Brand_Name, y=Change_num), fill = "orange") + 
+    geom_bar(colour="black", stat="identity", position=position_dodge(),  size=.3, fill ="blue") + 
+    geom_text(aes(label = Change, y=Change_num + 0.05), size = 6) +
+    xlab("Brand Name") + ylab("Percent Change") + # Set axis labels
+    ggtitle("Percent Change First 5 Months vs Last 5 Months") +  # Set title
+    theme_bw() + theme(axis.ticks = element_blank(), axis.text.y = element_blank())
+rm(am_tbl)
+```
+
+
+#### Change in Counts Frist 5 Months vs Last 5 Months
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE,  fig.width=9}
+cnt_tbl = p_tbl  %>%
+        select(Period, Brand_Name, Total_Counts) %>%
+         dcast(., Brand_Name ~ Period) %>%
+          mutate( Change = paste(round( ((Last_5_Months - First_5_Months) / First_5_Months), 2)*100,"%",sep="")
+                  ,Change_num = round( ((Last_5_Months - First_5_Months) / First_5_Months), 2) ) %>%
+            arrange(desc(Change_num))
+
+ggplot(data=cnt_tbl, aes(x=Brand_Name, y=Change_num)) + 
+    geom_bar(colour="black", stat="identity", position=position_dodge(),  size=.3, fill ="orange") + 
+    geom_text(aes(label = Change, y=Change_num + 0.05), size = 6) +
+    xlab("Brand Name") + ylab("Percent Change") + # Set axis labels
+    ggtitle("Percent Change First 5 Months vs Last 5 Months") +  # Set title
+    theme_bw() + theme(axis.ticks = element_blank(), axis.text.y = element_blank())
+rm(cnt_tbl)
+```
+
+
+#### Trend Amounts over Time
+
+``` {r , echo=FALSE  , warning=FALSE,  results = "asis", fig.align='center'}
+  df %>% 
+  filter( brnd_nm == "T") %>%
+    select(Brand_Name = brnd_nm, date,  amt) %>% 
+     arrange(date) %>%
+      group_by (date) %>%
+         summarize(Amounts = sum(amt, na.rm=T)) %>%
+  ggvis( ~as.factor(date) , ~Amounts ) %>% layer_lines( stroke :="#FF9900" , strokeWidth := 4 ) %>% 
+  add_axis("x", title="Period", title_offset = 50 ,  properties = axis_props(labels = list( fontSize = 8))) %>% 
+  add_axis("y", title="") %>%
+  scale_numeric("y", domain = c(0,  120050000)) %>%
+   add_axis("x", orient = "top", ticks = 0, title = "T Amounts By Month",
+           properties = axis_props(
+             axis = list(stroke = "white"),
+             labels = list(fontSize = 0))) 
+```
+
+
+
+#### Share by Month Bar and Plot
+
+```{r , echo=FALSE  ,  results = "asis", fig.align='center', warning=FALSE, message=FALSE, fig.width=9}
+mnth <- prop.table(xtabs(
+  cnt ~ month + brnd_nm,
+  data = df[df$year == 2014 ,] ),1)
+
+share <- as.data.frame(ftable(mnth))
+share$Freq <- share$Freq*100
+
+ggplot(share, aes(x = month, y = Freq, fill = brnd_nm))+ ylim(0,100) + 
+  geom_bar(colour="black", stat="identity",   size=.3) +
+ scale_fill_brewer(palette = 12) +
+  #geom_text(aes(label = share), size = 6) +
+  labs(title = "2014 Market Share by Brand inCounts", 
+    y = "Share", x = "Month", fill = "Brand Name") +
+    theme_bw() 
+```
+
+
+#### Trending the brands shows there is clearly inaccurate data in the last month.
+
+```{r , echo=FALSE  ,  results = "asis", fig.align='center', warning=FALSE, message=FALSE, fig.width=9}
+# trended
+ggplot(share, aes(x = month, y = Freq, 
+      group = brnd_nm,  colour = brnd_nm)) + geom_line(size = 2 ) +
+   scale_fill_brewer(palette = 12) +
+  labs(title = "2014 Market  Share by in Counts", 
+    y = "Share", x = "Month", fill = "Brand Name") +
+    theme_bw() 
+
+# overlayed histograms
+# quantile(df$cnt); quantile(df$cnt, .9)
+```
+
+#### Histogram of Counts in 2014 by Brand
+
+```{r , echo=FALSE  ,  results = "asis", fig.align='center', warning=FALSE, fig.width=9, message=FALSE}
+df %>% filter(year == 2014) %>%
+ggplot(., aes(x = cnt, fill = brnd_nm)) +
+  geom_histogram(bindwidth = 2, colour = "black") +
+  facet_wrap(~ brnd_nm) +
+  #geom_vline(aes(xintercept = mean(cnt, na.rm=T))
+  #           , color = "red", linetype = "dashed")
+  scale_fill_brewer(palette = 12) +
+  xlim(0,40) +
+   scale_fill_brewer(palette = 5) +
+  labs(title = "2014 Market Trends by Brand in Counts", 
+    y = "Share", x = "", fill = "Brand Name") +
+    theme_bw() 
+```
+
+#### Counts in 2014 by Brand
+
+```{r , echo=FALSE  ,  results = "asis", fig.align='center', warning=FALSE, fig.width=9, message=FALSE}
+df %>% filter(year == 2014) %>%
+  ggplot(., aes(x = brnd_nm , y = cnt, fill = brnd_nm)) + geom_boxplot() +
+  guides(fill=FALSE) + ylim(0,40) +
+  scale_fill_brewer(palette = 12) +
+  coord_flip() +  xlab("Brand Name") + ylab("df Counts") + 
+    ggtitle("Spread of Counts Below 95% Quantile") +  
+    theme_bw()
+```
+
+#### Measuring outliers there are in counts
+-- First is a general spread
+-- Next is the 90th percentile 
+-- Next is the 95th percentile
+-- Finally the range of values is shown
+
+```{r , echo=TRUE ,  results = "asis", fig.align='center', warning=FALSE,  message=FALSE, collapse=TRUE }
+round(summary(df$cnt),2)
+round(quantile(df$cnt, 0.95),2)
+round(quantile(df$cnt, 0.90),2)
+round(range(df$cnt),2)
+```
+
+#### Fitting a linear model to capture the the trend 
+
+``` {r , echo=FALSE  , warning=FALSE,  results = "asis", fig.align='center', warning=FALSE, fig.width=9,cache.comments=FALSE, message=FALSE}
+smth <- df %>% 
+  filter( brnd_nm %in% c('A', 'T')) %>% 
+    select(brnd_nm, date,  amt) %>% 
+     arrange(date) %>%
+      group_by (date, brnd_nm) %>%
+   summarize(Amounts = sum(amt, na.rm=T)) 
+  
+ggplot(smth, aes(date, Amounts,  group = brnd_nm, colour = brnd_nm) ) + 
+  geom_line( size = 1, aes(linetype = brnd_nm )) +
+  geom_point(size = 2, fill ="white") +
+   facet_grid(~ brnd_nm) +
+  scale_fill_brewer(palette = 12) +
+  geom_smooth() +
+    xlab("Date") + ylab("Total Amount") + 
+    ggtitle("Total Amount with 95% CI by Brand") +  
+   theme(axis.text = element_text( size=.5)) +
+    theme_bw()
+````
+
+####The Year Over Year Change Across Counts
+
+``` {r  , echo=FALSE  ,  results = "asis", fig.align='center', warning=FALSE, fig.width=9}
+load("yearly.RData")
+load("brnd_lookup.RData")
+
+yramounts <- left_join(yr_comp, brnd, by = c("BRNDID"))
+yramounts <- tbl_df(yramounts)
+names(yramounts) <- tolower(names(yramounts))
+yramounts$brnd_nm <- toupper(yramounts$brnd_nm)
+
+```
+
+#### Examining the Y/Y change between Brands
+
+``` {r  , echo=FALSE  ,  results = "asis", fig.align='center', warning=FALSE, message=FALSE, fig.width=9}
+y_tbl <- yramounts %>% 
+  select(year, month, cnt, brnd_nm) %>%
+  group_by(year, month, brnd_nm) %>%
+  summarize(ttl_cnt = sum(cnt, na.rm=T)) %>%
+  dcast(., brnd_nm + month ~ year)
+
+names(y_tbl) <- c("brnd_nm", "month", "year_2013", "year_2014")
+
+y_tbl %>%
+  mutate( diff = year_2014 / year_2013) %>%
+  ggplot(., aes(x = factor(month), y = diff
+                ,group = brnd_nm, colour = brnd_nm)) + 
+  geom_line( size = 2) + ylim(0,140) +
+   scale_fill_brewer(palette = 5) +
+  labs(title = "Y/Y Index of Counts by Brands", 
+    y = "Count Index", x = "", fill = "Brand Name") +
+    theme_bw() 
+rm(y_tbl)
+````
+
+
+####Trend of Counts Over Time, show steep increase for after launch.
+
+``` {r , echo=FALSE  , warning=FALSE, results = "asis", fig.align='center', fig.width=9}
+  df %>% 
+  filter( brnd_nm == "T") %>%
+  select(date, cnt) %>% 
+  group_by (date) %>%
+  summarize( Counts = sum(cnt, na.rm=T)) %>%
+  ggvis( ~ factor(date) , ~Counts ) %>% layer_lines( stroke :="#0040FF" , strokeWidth := 4 ) %>% 
+  add_axis("x", title="Period", title_offset = 50 ,  properties = axis_props(labels = list( fontSize = 8))) %>% 
+  add_axis("y", title="") %>%
+  scale_numeric("y", domain = c(0,  90000)) %>%
+   add_axis("x", orient = "top", ticks = 0, title = "T Counts By Month",
+           properties = axis_props(
+             axis = list(stroke = "white"),
+             labels = list(fontSize = 0))) 
+````
+
+####Trend of counts shows that stable market with one exception.
+
+``` {r  , echo=FALSE  ,  results = "asis", fig.align='center', warning=FALSE, fig.width=10}
+df %>% 
+  select(brnd_nm, date,  cnt) %>% 
+  group_by (date, brnd_nm) %>%
+  summarize( Counts = sum(cnt, na.rm=T)) %>%
+ggplot(. , aes(x = factor(date), y = Counts,
+               group = brnd_nm,  colour = brnd_nm)) + geom_line(size = 2 ) +
+   scale_fill_brewer(palette = 12) +
+  labs(title = "Brands : Counts By Month" ,
+    y = "Counts", x = "Date") +
+  theme(axis.text=element_text(size=6), axis.title=element_text(size=6)) +
+    theme_bw() 
+
+````
+
+
+####Overall Counts and Amounts by the Brand for 2014
+
+``` {r  , echo=FALSE  ,  results = "asis", fig.align='center', warning=FALSE, fig.width=9, comment=F, message=F}
+ df %>% 
+  filter( year == 2014 ) %>%
+  ggplot(., aes(x = amt , y = cnt, group = brnd_nm, colour = brnd_nm)) + geom_point(shape=1) +
+  xlim(0,6000) + ylim(0, 20) + 
+  facet_wrap(~ brnd_nm) +
+  scale_fill_brewer(palette = 12) +
+  geom_smooth()+
+  labs(title = "Count and Amounts in 2014 by Brand" ,  y = "Count", x = "Amount") +
+  theme_bw() 
+````
+

@@ -1,0 +1,277 @@
+---
+title: "Potential to Buy"
+author: "Charles Frenzel"
+date: "January 2, 2014"
+output: html_document
+---
+
+###Overview
+
+```{r  libraries}
+rm(list = ls(all = TRUE))
+
+library(plyr)
+library(dplyr)
+library("caret")
+library(pROC)
+library(gtools)
+library(sampling)
+```
+
+###Data Pulling and Prepration
+
+
+```{r data_pull}
+dat_df <- read.csv("", stringsAsFactors = T )
+
+dat_df$depvar <-  ifelse(dat_df$Acceleration == "Rapid", 1, 0)
+
+dat_df$Acceleration <- NULL
+
+glimpse(dat_df)
+dim(dat_df)
+table(dat_df$depvar)
+prop.table(table(dat_df$depvar))*100
+
+```
+
+
+###PreProcessing
+
+Prepossessing will do three things to the the data :
+
+- Remove inter correlated features
+- Remove features that are near uniary in nature
+- Check for missing values
+
+```{r  precprocessing}
+# in numeric examine missing and impute/ fix 
+sum(is.na(dat_df[ , names(dat_df) != 'depvar']))
+
+# check for variance among indepent vars
+nzv <- nearZeroVar(dat_df[ , names(dat_df) != 'depvar'])
+nzv
+dat_df2 = dat_df[ ,-nzv]
+names(dat_df[ ,nzv])
+
+names(dat_df)
+# check correlation with depvar 
+round(cor(dat_df),2)[, 34]
+
+
+# idtenfiy intercorreltion between vars
+dat_df2 <- na.omit(dat_df2)
+
+rho <-  cor(dat_df2[ , !names(dat_df2) %in%  c('depvar', 'DR_Title') ])
+sum(abs(rho[upper.tri(rho)]) > 0.75)
+h_cor = findCorrelation(rho, cutoff = 0.75)
+
+names(dat_df2[ , h_cor])
+dat_df2 <- dat_df2[ ,-h_cor]
+
+```
+
+
+Re-sample with equal probabilities and then split data testing and training. 
+
+To generalize better with the overall population - I am taking Drug as having a 50/50 chance of occurring - for now.
+
+In addition, to re-sampling - the seed is set to make the results reproducible and captivity is changed to a factor - to be predicted on a yes event.
+
+The data is then split into a testing and training set with 25% being held out for testing.
+
+```{r Sampling}
+set.seed(1234)
+
+# center and scale values
+#m_df5 <- data.frame(scale(m_df4[ ,names(m_df4) != "depvar"]), depvar = m_df4$depvar)
+
+# factor level order
+dat_df2$depvar <- as.factor(dat_df2$depvar)
+levels(as.factor(dat_df2$depvar))
+dat_df2$depvar <- relevel(dat_df2$depvar , "1")
+levels(as.factor(dat_df2$depvar))
+
+# split into two with equl probability
+table(dat_df2$depvar) ; dim(dat_df2)
+
+resamp = strata(dat_df2, stratanames=c("depvar")
+                ,size = c(500, 500), method=c("srswr"))
+dat_df3 = getdata(dat_df2, resamp)
+
+dat_df3$ID_unit <- NULL
+dat_df3$Prob <- NULL
+dat_df3$Stratum <- NULL
+
+table(dat_df3$depvar)
+
+# split into training and testing 
+set.seed(1234)
+inT <- createDataPartition(dat_df3$depvar, p = 0.70, list = FALSE)
+train<- dat_df3[inT, ]
+test <- dat_df3[-inT, ]
+
+write.table(dat_df3, file="", sep=",", row.names=F)
+
+```
+
+### Learning Tasks
+
+Four tasks were used to identify the strongest learner:
+- Random Forest
+- CHART
+- C5.0
+- Logistic Regression
+
+The best performing task was chosen based on several metrics which includes its ability to generalize to testing data and how much overall "lift" it provides.
+
+To avoid uncertainty about the results - they were cross-validated. 
+
+Best performing model thus far so will be run first - RF.
+This will be done in parallel and probabilities will be generated along with a lift chart.
+
+RF will grow about 500 to 1000 trees and average the results to build a predictive model.
+
+```{r Random_Forest}
+#ctrl <- trainControl( method="repeatedcv", number = 10
+                  #    ,  repeats = 10, classProbs=T
+                   #   , summaryFunction = twoClassSummary)
+
+ctrl <- trainControl(method="cv", number = 3,  classProbs=T, summaryFunction = twoClassSummary)
+
+rffit <- train(depvar~., data=train, method="rf"
+                 ,prox=TRUE, allowParallel=TRUE
+                , metric="ROC", verbose=F
+                 , trControl = ctrl)
+
+rffit$results
+rffit$finalModel
+
+rf_pred <- predict(rffit, test)
+confusionMatrix(rf_pred, factor(test$depvar) ) # 82% accuracy
+
+varImp(rffit, scale=F)
+#plot(varImp(rffit, scale=F))
+plot(rffit)
+
+rf_probs <- predict(rffit, newdata = test[ ,names(test) != "depvar"] , type = "prob")
+
+head(rf_probs)
+rf_roc = roc(test$depvar, rf_probs$Rapid)
+plot(rf_roc, type = "S", print.thres = .5)
+
+
+#save("rffit", file="rffit.RData")
+```
+
+Using CHART as a baseline comparison for other techniques.
+
+Chart is going to build out 45 trees and "vote" on the best one.
+
+```{r  CHART}
+rp_fit = train(  as.factor(depvar) ~. 
+                 , data=train,  method = "rpart", tuneLength = 50,
+       trControl = ctrl, metric = "ROC")
+
+rp_fit
+plot(rp_fit)
+varImp(rp_fit)
+
+r_pred <- predict(rp_fit, test)
+confusionMatrix(r_pred, factor(test$depvar)) #64%
+
+r_probs <- predict(rp_fit, newdata = test[ ,names(test) != "depvar"]
+                   , type = "prob" )
+
+r_roc <- roc(test$depvar, r_probs$yes)
+plot(r_roc, type = "S", print.thres = 0.5)
+
+#save(rp_fit, file="CHART.RData")
+```
+
+C5 ran with 50 tree trials. Similar to chart but will use gini statistic to calculate, instead of entropy.
+
+```{r  C5.0}
+grid <- expand.grid(.model = "tree",  .trials = c(1:50), .winnow = FALSE)
+
+c5_fit <- train( train[ ,names(train) != "depvar"]
+                 , train$depvar, method = "C5.0",
+                metric = "ROC", tuneGrid = grid,
+                trControl = ctrl  ,prox=TRUE, allowParallel=TRUE)
+
+c5_fit$results
+c5_fit$finalModel
+plot(c5_fit)
+varImp(c5_fit)
+
+c5_pred <- predict(c5_fit, test)
+confusionMatrix(c5_pred, factor(test$depvar)) #78%
+
+c_probs <- predict(c5_fit, newdata = test[ ,names(test) != "depvar"]
+                   , type = "prob" )
+c_roc <- roc(test$depvar, c_probs$Rapid)
+plot(c_roc, type = "S", print.thres = 0.5)
+
+#save( c5_fit, file="C5.RData")
+```
+
+Generating a tradition linear model for comparison of all the above.
+This will default to logistics regression.
+Please no that CI means confidence interval and is where we would expect accuracy of the model to fall.
+
+
+```{r  GLM, }
+glm_fit <- train( train[ ,names(train) != "depvar"]
+                  , train$depvar, method = "glm",
+                metric = "ROC", 
+                trControl = ctrl)
+
+glm_fit$results
+glm_fit$finalModel
+
+varImp(glm_fit)
+
+glm_pred <- predict(glm_fit, test)
+confusionMatrix(glm_pred, factor(test$depvar)) #78%
+
+glm_probs <- predict(glm_fit, newdata = test[ ,names(test) != "depvar"], type = "prob" )
+glm_roc <- roc(test$depvar, glm_probs$Rapid)
+plot(glm_roc, type = "S", print.thres = 0.5)
+
+#save(glm_fit, file="GLM.RData")
+```
+
+
+
+
+Taking all of the results and collating them for comparisons and some diagnostics.
+It appears that RF performs the best followed by C5.0.
+
+```{r  Model_Comparison}
+#load("rffit.RData")
+#load("C5.RData")
+#load("CHART.RData")
+#load("GLM.RData")
+
+plot( rf_roc, type = "S", print.thres = .5)
+plot( r_roc, add = T, col = "#00FFFF")
+plot( c_roc, add = T, col = "#9E0142")
+plot(glm_roc, add=T, col="grey")
+
+# Comparing model performance with resampling
+# collates results of all 3 models
+cv <- resamples(list(  RF = rffit,  CHART = rp_fit, C5.0 = c5_fit, GLM = glm_fit))
+summary(cv)
+
+# visualizing resampling
+splom( cv, metric = "ROC")
+xyplot(cv, metric = "ROC")
+parallelplot(cv, metric = "ROC")
+dotplot(cv, metric = "ROC")
+
+# comparing model differences
+roc_dif <- diff(cv, metric = "ROC")
+summary(roc_dif)
+dotplot(roc_dif, metric ="ROC")
+
+```
